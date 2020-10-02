@@ -1,0 +1,58 @@
+# Template dockerfile for PrairieLearn workspaces.
+# As discussed here: https://github.com/PrairieLearn/PrairieLearn/issues/3170
+# Customize as needed; please point out any flaws.
+
+FROM codercom/code-server:3.4.1
+
+# We want to standardize on using 1001:1001 for the user.
+USER root
+RUN export OLD_UID=$(id -u coder) && \
+	export OLD_GID=$(id -g coder) && \
+	export NEW_UID=1001 && \
+	export NEW_GID=1001 && \
+	groupmod -g 1001 coder && \
+	usermod -u 1001 -g 1001 coder && \
+	find /home -user $OLD_UID -execdir chown -h $NEW_UID {} + && \
+	find /home -group $OLD_GID -execdir chgrp -h $NEW_GID {} + && \
+	unset OLD_UID OLD_GID NEW_UID NEW_GID
+
+# Cleaning up the cache in the same step when we install is important
+# if you want to minimize the image size.
+USER coder
+RUN ( code-server --disable-telemetry --force \
+		# Install only one extension per line.
+		--install-extension hediet.vscode-drawio \
+		# --install-extension something.else \
+	) && \
+	rm -rf /home/coder/.local/share/code-server/CachedExtensionVSIXs
+
+USER root
+RUN	rm -f /run/fixuid.ran && \
+	echo "" > /usr/bin/entrypoint.sh && chmod 0755 /usr/bin/entrypoint.sh && \
+	/usr/bin/env echo -e '#!/usr/bin/env sh \n' \
+		'set -eu \n' \
+		'if [ "${DOCKER_USER-}" ]; then \n' \
+		'  echo "$DOCKER_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers.d/nopasswd > /dev/null \n' \
+		'  sudo usermod --login "$DOCKER_USER" \ \n' \
+		'    --move-home --home "/home/$DOCKER_USER" \ \n' \
+		'    coder \n' \
+		'  sudo groupmod -n "$DOCKER_USER" coder \n' \
+		'  sudo sed -i "/coder/d" /etc/sudoers.d/nopasswd \n' \
+		'  sudo sed -i "s/coder/$DOCKER_USER/g" /etc/fixuid/config.yml \n' \
+		'  export HOME="/home/$DOCKER_USER" \n' \
+		'fi \n' \
+		'# This is not set by default. \n' \
+		'export USER="coder" \n' \
+		'dumb-init /usr/bin/entrypoint-helper.sh "$@" \n' >> /usr/bin/entrypoint.sh && \
+	echo "" > /usr/bin/entrypoint-helper.sh && chmod 0755 /usr/bin/entrypoint-helper.sh && \
+	/usr/bin/env echo -e '#!/usr/bin/env sh \n' \
+		'set -eu \n' \
+		'eval $( fixuid ) \n' \
+		'# After fixuid: \n' \
+		'/usr/bin/code-server --auth none "$@" \n' >> /usr/bin/entrypoint-helper.sh
+
+EXPOSE 8080
+USER coder
+WORKDIR /home/coder
+
+ENTRYPOINT ["/usr/bin/env", "sh", "/usr/bin/entrypoint.sh", "--bind-addr", "0.0.0.0:8080", "."]
