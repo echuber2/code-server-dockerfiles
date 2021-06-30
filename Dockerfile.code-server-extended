@@ -4,7 +4,9 @@
 
 FROM codercom/code-server:3.4.1
 
-# We want to standardize on using 1001:1001 for the user.
+# We want to standardize on using 1001:1001 for the user. We change the
+# "coder" account's UID and GID here so that fixuid has no work to do later.
+# This speeds up container loading time drastically.
 USER root
 RUN export OLD_UID=$(id -u coder) && \
 	export OLD_GID=$(id -g coder) && \
@@ -26,10 +28,15 @@ RUN ( code-server --disable-telemetry --force \
 	) && \
 	rm -rf /home/coder/.local/share/code-server/CachedExtensionVSIXs
 
+# Prepare the entrypoints. The entrypoint.sh part is based on what code-server
+# originally had, so it may need to be updated when code-server is updated.
+# The entrypoint-helper.sh part is meant to stop fixuid from running if we are
+# testing with root locally, because that would cause an unnecessary loading
+# timeout in PL. We also disable auth as PL handles it.
 USER root
 RUN	rm -f /run/fixuid.ran && \
 	echo "" > /usr/bin/entrypoint.sh && chmod 0755 /usr/bin/entrypoint.sh && \
-	/usr/bin/env echo -e '#!/usr/bin/env sh \n' \
+	/usr/bin/env echo -e '#!/usr/bin/env bash \n' \
 		'set -eu \n' \
 		'if [ "${DOCKER_USER-}" ]; then \n' \
 		'  echo "$DOCKER_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers.d/nopasswd > /dev/null \n' \
@@ -43,16 +50,35 @@ RUN	rm -f /run/fixuid.ran && \
 		'fi \n' \
 		'# This is not set by default. \n' \
 		'export USER="coder" \n' \
-		'dumb-init /usr/bin/entrypoint-helper.sh "$@" \n' >> /usr/bin/entrypoint.sh && \
+		'sh /usr/bin/entrypoint-helper.sh "$@" \n' >> /usr/bin/entrypoint.sh && \
 	echo "" > /usr/bin/entrypoint-helper.sh && chmod 0755 /usr/bin/entrypoint-helper.sh && \
-	/usr/bin/env echo -e '#!/usr/bin/env sh \n' \
+	/usr/bin/env echo -e '#!/usr/bin/env bash \n' \
 		'set -eu \n' \
-		'eval $( fixuid ) \n' \
+		'# Run fixuid only if we are not root: \n' \
+		'[ $(id -u) -ne 0 ] && eval $( fixuid ) \n' \
 		'# After fixuid: \n' \
-		'/usr/bin/code-server --auth none "$@" \n' >> /usr/bin/entrypoint-helper.sh
+		'dumb-init /usr/bin/code-server --auth none "$@" \n' >> /usr/bin/entrypoint-helper.sh
 
 EXPOSE 8080
+
 USER coder
 WORKDIR /home/coder
+
+# EDITOR_FOCUS_DIR should be set to the directory you want the editor to start
+# up in. This is not necessarily the same as the "home" setting in the
+# question's info.json file. The "home" setting determines the mount point for
+# the persistent cloud storage, which will hide any contents your image
+# originally had at the same path. You might want to set both EDITOR_FOCUS_DIR
+# and "home" to a deeper directory than /home/coder if you want to keep the
+# default home contents from the workspace image (~/.local, etc.). For
+# example, using /home/coder/question will copy the question's workspace
+# folder contents into an empty mount at /home/coder/question and save it for
+# the student, while always reusing the initial contents of /home/coder that
+# you prepared in the image. (However, if students try to customize their
+# editor settings, those will get reset in between sessions this way.)
+USER coder
+ENV EDITOR_FOCUS_DIR "/home/coder/question"
+RUN mkdir -p "$EDITOR_FOCUS_DIR"
+WORKDIR "$EDITOR_FOCUS_DIR"
 
 ENTRYPOINT ["/usr/bin/env", "sh", "/usr/bin/entrypoint.sh", "--bind-addr", "0.0.0.0:8080", "."]
